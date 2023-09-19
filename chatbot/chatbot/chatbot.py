@@ -3,31 +3,38 @@
 from datetime import datetime
 
 # Import pynecone.
-import openai
 import pynecone as pc
+import os
 from pynecone.base import Base
+from langchain.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
 # openai.api_key = "<YOUR_OPENAI_API_KEY>"
 f = open("./chatbot/apiKey.txt", 'r')
 line = f.readline()
 f.close()
-openai.api_key = line
+os.environ["OPENAI_API_KEY"] = line
+
+file = open('./kakao_sync_data.txt', 'r')
+kakao_sync_data = file.read()
+file.close()
+
+llm = ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo-16k')
 
 
-def chat_with_chatgpt(text) -> str:
-    # system instruction 만들고
-    system_instruction = f"assistant는 채팅 봇으로 동작한다. {text}에 대한 적절한 답변을 대화체로 반환한다."
+def make_prompt_template() -> PromptTemplate:
+    return PromptTemplate(
+        input_variables=["text"],
+        template="사용자의 질문에 대한 적절한 답변을 주어진 정보에서 찾아서 반환해야 한다. \n답변은 두 문단 내로 간략하게 제공한다. \n<정보>: \n"
+                 + kakao_sync_data + "\n <질문>: {text}"
+    )
 
-    messages = [{"role": "system", "content": system_instruction},
-                {"role": "user", "content": text}
-                ]
 
-    # API 호출
-    response = openai.ChatCompletion.create(model="gpt-3.5-turbo",
-                                            messages=messages)
-    translated_text = response['choices'][0]['message']['content']
-    # Return
-    return translated_text
+def ask_about_kakao_sync(text) -> str:
+    prompt_template = make_prompt_template()
+    chain = LLMChain(llm=llm, verbose=True, prompt=prompt_template)
+    return chain.run(text)
 
 
 class Message(Base):
@@ -41,19 +48,19 @@ class State(pc.State):
 
     text: str = ""
     messages: list[Message] = []
+    answer = "Answer will appear here."
 
-    @pc.var
-    def output(self) -> str:
+    def output(self):
         if not self.text.strip():
             return "Answer will appear here."
-        answer = chat_with_chatgpt(self.text)
-        return answer
+        self.answer = ask_about_kakao_sync(self.text)
 
     def post(self):
+        self.output()
         self.messages = [
                             Message(
                                 original_text=self.text,
-                                text=self.output,
+                                text=self.answer,
                                 created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"),
                             )
                         ] + self.messages
@@ -137,7 +144,7 @@ def output():
             position="absolute",
             top="-0.5rem",
         ),
-        pc.text(State.output),
+        pc.text(State.answer),
         padding="1rem",
         border="1px solid #eaeaef",
         margin_top="1rem",
