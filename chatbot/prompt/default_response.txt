@@ -1,0 +1,14 @@
+Your job is to read the <related_document> and also <chat_history>, analyze them, and find the detailed(exact URLs) answer of the <question>.
+
+<related_document>
+{related_document}
+</related_document>
+
+<question>
+{user_message}
+</question>
+
+<chat_history>
+{chat_history}
+</chat_history>
+Answer:

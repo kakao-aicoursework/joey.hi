@@ -15,6 +15,7 @@ from langchain.prompts.chat import ChatPromptTemplate
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import Chroma
 from pynecone.base import Base
+from langchain.memory import ConversationBufferMemory, FileChatMessageHistory
 
 # openai.api_key = "<YOUR_OPENAI_API_KEY>"
 f = open("./chatbot/apiKey.txt", 'r')
@@ -29,6 +30,7 @@ CUR_DIR = os.path.dirname(os.path.join(os.path.abspath("./chatbot")))
 DATA_DIR = os.path.join(CUR_DIR, "data/")
 CHROMA_PERSIST_DIR = os.path.join(DATA_DIR, "upload/chroma-persist")
 CHROMA_COLLECTION_NAME = "kakao-bot"
+HISTORY_DIR = os.path.join(DATA_DIR, "chat_histories")
 
 PROMPT_DIR = os.path.join(CUR_DIR, "prompt/")
 PARSE_INTENT_PROMPT_TEMPLATE = os.path.join(PROMPT_DIR, "parse_intent.txt")
@@ -36,6 +38,30 @@ INTENT_LIST = os.path.join(PROMPT_DIR, "intent.txt")
 FIND_FROM_INFO_PROMPT_TEMPLATE = os.path.join(PROMPT_DIR, "find_from_info.txt")
 
 llmModel = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
+
+
+def load_conversation_history(conversation_id: str):
+    file_path = os.path.join(HISTORY_DIR, f"{conversation_id}.json")
+    return FileChatMessageHistory(file_path)
+
+
+def log_user_message(history: FileChatMessageHistory, user_message: str):
+    history.add_user_message(user_message)
+
+
+def log_bot_message(history: FileChatMessageHistory, bot_message: str):
+    history.add_ai_message(bot_message)
+
+
+def get_chat_history(conversation_id: str):
+    history = load_conversation_history(conversation_id)
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        input_key="user_message",
+        chat_memory=history,
+    )
+
+    return memory.buffer
 
 
 def read_prompt_template(file_path: str) -> str:
@@ -124,10 +150,13 @@ def query_db(query: str, use_retriever: bool = False) -> list[str]:
     return str_docs
 
 
-def generate_answer(user_message) -> dict[str, str]:
+def generate_answer(user_message, conversation_id: str = 'fa1010') -> dict[str, str]:
+    history_file = load_conversation_history(conversation_id)
+
     context = dict(user_message=user_message)
     context["input"] = context["user_message"]
     context["intent_list"] = read_prompt_template(INTENT_LIST)
+    context["chat_history"] = get_chat_history(conversation_id)
 
     intent = parse_intent_chain.run(context)
 
@@ -135,29 +164,17 @@ def generate_answer(user_message) -> dict[str, str]:
         context["related_document"] = query_db(context["user_message"])
         answer = find_answer_chain.run(context)
     else:
+        context["related_documents"] = query_db(context["user_message"])
         answer = default_chain.run(context["user_message"])
 
+    log_user_message(history_file, user_message)
+    log_bot_message(history_file, answer)
     return {"answer": answer}
 
 
 def ask_to_chatbot(text):
     answer = generate_answer(text)
     return answer['answer']
-
-
-#
-# def make_prompt_template() -> PromptTemplate:
-#     return PromptTemplate(
-#         input_variables=["text"],
-#         template="사용자의 질문에 대한 적절한 답변을 주어진 정보에서 찾아서 반환해야 한다. \n답변은 두 문단 내로 간략하게 제공한다. \n<정보>: \n"
-#                  + kakao_sync_data + "\n <질문>: {text}"
-#     )
-
-#
-# def ask_about_kakao_sync(text) -> str:
-#     prompt_template = make_prompt_template()
-#     chain = LLMChain(llm=llm, verbose=True, prompt=prompt_template)
-#     return chain.run(text)
 
 
 class Message(Base):
