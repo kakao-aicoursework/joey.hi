@@ -1,35 +1,79 @@
 """Welcome to Pynecone! This file outlines the steps to create a basic app."""
 
+import os
 from datetime import datetime
 
 # Import pynecone.
 import pynecone as pc
-import os
-import chromadb
-from pynecone.base import Base
+from langchain.chains import LLMChain, ConversationChain
 from langchain.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
-from langchain.text_splitter import CharacterTextSplitter
 from langchain.document_loaders import (
     TextLoader
 )
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.prompts.chat import ChatPromptTemplate
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores import Chroma
+from pynecone.base import Base
 
 # openai.api_key = "<YOUR_OPENAI_API_KEY>"
 f = open("./chatbot/apiKey.txt", 'r')
 line = f.readline()
 f.close()
 os.environ["OPENAI_API_KEY"] = line
-llm = ChatOpenAI(temperature=0, model_name='gpt-3.5-turbo-16k')
 
 LOADER_DICT = {
     "txt": TextLoader,
 }
-DATA_DIR = os.path.dirname(os.path.relpath('./data/'))
+CUR_DIR = os.path.dirname(os.path.join(os.path.abspath("./chatbot")))
+DATA_DIR = os.path.join(CUR_DIR, "data/")
 CHROMA_PERSIST_DIR = os.path.join(DATA_DIR, "upload/chroma-persist")
 CHROMA_COLLECTION_NAME = "kakao-bot"
+
+PROMPT_DIR = os.path.join(CUR_DIR, "prompt/")
+PARSE_INTENT_PROMPT_TEMPLATE = os.path.join(PROMPT_DIR, "parse_intent.txt")
+INTENT_LIST = os.path.join(PROMPT_DIR, "intent.txt")
+FIND_FROM_INFO_PROMPT_TEMPLATE = os.path.join(PROMPT_DIR, "find_from_info.txt")
+
+llmModel = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
+
+
+def read_prompt_template(file_path: str) -> str:
+    with open(file_path, "r") as file:
+        prompt_template = file.read()
+
+    return prompt_template
+
+
+def create_chain(template_path, output_key):
+    return LLMChain(
+        llm=llmModel,
+        prompt=ChatPromptTemplate.from_template(
+            template=read_prompt_template(template_path)
+        ),
+        output_key=output_key,
+        verbose=True,
+    )
+
+
+parse_intent_chain = create_chain(
+    template_path=PARSE_INTENT_PROMPT_TEMPLATE,
+    output_key="intent"
+)
+
+find_answer_chain = create_chain(
+    template_path=FIND_FROM_INFO_PROMPT_TEMPLATE,
+    output_key="answer"
+)
+
+default_chain = ConversationChain(llm=llmModel, output_key="text")
+
+_db = Chroma(
+    persist_directory=CHROMA_PERSIST_DIR,
+    embedding_function=OpenAIEmbeddings(),
+    collection_name=CHROMA_COLLECTION_NAME,
+)
+_retriever = _db.as_retriever()
 
 
 def upload_embedding_from_file(file_path):
@@ -38,12 +82,13 @@ def upload_embedding_from_file(file_path):
         raise ValueError("Not supported file type")
     documents = loader(file_path).load()
 
-    text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100) # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
+    text_splitter = CharacterTextSplitter(chunk_size=500,
+                                          chunk_overlap=100)  # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
     docs = text_splitter.split_documents(documents)
 
-    Chroma.from_documents( # ChromaDB에 저장함.
+    Chroma.from_documents(  # ChromaDB에 저장함.
         docs,
-        OpenAIEmbeddings(), # openai의 임베딩 사용
+        OpenAIEmbeddings(),  # openai의 임베딩 사용
         collection_name=CHROMA_COLLECTION_NAME,
         persist_directory=CHROMA_PERSIST_DIR,
     )
@@ -54,7 +99,6 @@ def upload_embeddings_from_dir(dir_path):
     failed_upload_files = []
 
     for root, dirs, files in os.walk(dir_path):
-        print(files)
         for file in files:
             if file.endswith(".txt"):
                 file_path = os.path.join(root, file)
@@ -67,18 +111,39 @@ def upload_embeddings_from_dir(dir_path):
                     failed_upload_files.append(file_path)
 
 
+upload_embeddings_from_dir(os.path.relpath('./data/'))
+
+
+def query_db(query: str, use_retriever: bool = False) -> list[str]:
+    if use_retriever:
+        docs = _retriever.get_relevant_documents(query)
+    else:
+        docs = _db.similarity_search(query)
+
+    str_docs = [doc.page_content for doc in docs]
+    return str_docs
+
+
+def generate_answer(user_message) -> dict[str, str]:
+    context = dict(user_message=user_message)
+    context["input"] = context["user_message"]
+    context["intent_list"] = read_prompt_template(INTENT_LIST)
+
+    intent = parse_intent_chain.run(context)
+
+    if intent == "kakao_channel" or intent == "kakao_sync" or intent == "kakao_social":
+        context["related_document"] = query_db(context["user_message"])
+        answer = find_answer_chain.run(context)
+    else:
+        answer = default_chain.run(context["user_message"])
+
+    return {"answer": answer}
+
+
 def ask_to_chatbot(text):
-    upload_embeddings_from_dir(os.path.relpath('./data/'))
-    db = Chroma(
-        persist_directory=CHROMA_PERSIST_DIR,
-        embedding_function=OpenAIEmbeddings(),
-        collection_name=CHROMA_COLLECTION_NAME,
-    )
+    answer = generate_answer(text)
+    return answer['answer']
 
-    docs = db.similarity_search(text)
-    print(docs)
-
-    return docs
 
 #
 # def make_prompt_template() -> PromptTemplate:

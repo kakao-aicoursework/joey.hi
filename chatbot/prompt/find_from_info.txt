@@ -1,0 +1,11 @@
+Your job is to read the <related_document>, analyze it, and find the proper answer of the <question>
+
+<related_document>
+{related_document}
+</related_document>
+
+<question>
+{user_message}
+</question>
+
+Answer:
