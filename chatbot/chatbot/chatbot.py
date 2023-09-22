@@ -1,8 +1,9 @@
 """Welcome to Pynecone! This file outlines the steps to create a basic app."""
-
+import json
 import os
 from datetime import datetime
 
+import openai
 # Import pynecone.
 import pynecone as pc
 from langchain.chains import LLMChain, ConversationChain
@@ -11,11 +12,11 @@ from langchain.document_loaders import (
     TextLoader
 )
 from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.memory import ConversationBufferMemory, FileChatMessageHistory
 from langchain.prompts.chat import ChatPromptTemplate
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import Chroma
 from pynecone.base import Base
-from langchain.memory import ConversationBufferMemory, FileChatMessageHistory
 
 # openai.api_key = "<YOUR_OPENAI_API_KEY>"
 f = open("./chatbot/apiKey.txt", 'r')
@@ -108,8 +109,8 @@ def upload_embedding_from_file(file_path):
         raise ValueError("Not supported file type")
     documents = loader(file_path).load()
 
-    text_splitter = CharacterTextSplitter(chunk_size=500,
-                                          chunk_overlap=100)  # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
+    text_splitter = CharacterTextSplitter(chunk_size=300,
+                                          chunk_overlap=50)  # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
     docs = text_splitter.split_documents(documents)
 
     Chroma.from_documents(  # ChromaDB에 저장함.
@@ -150,19 +151,91 @@ def query_db(query: str, use_retriever: bool = False) -> list[str]:
     return str_docs
 
 
+def get_url_from_data(url_value):
+    data = {
+        "urls": url_value
+    }
+    return json.dumps(data)
+
+
+def use_function_call(question, data):
+    prompt = f"""
+    주어진 정보에서 질문과 관련된 URL(Uniform Resource Locators) 값 하나를 출력형식에 맞게 뽑아와줘.
+
+    질문: {question}
+    입력: {data}
+    
+    <출력 형식>
+    : url 값
+    # """
+    messages = [{"role": "user", "content": prompt}]
+    functions = [
+        {
+            "name": "get_url_from_data",
+            "description": "주어진 자료에서 질문과 관련된 URL(Uniform Resource Locators) 값을 찾아야 합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url_value": {
+                        "type": "string",
+                        "description": "url 값 eg. http:://google.com",
+                    },
+                },
+                "required": ["url_value"],
+            },
+        }
+    ]
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=messages,
+        functions=functions,
+        function_call="auto",
+    )
+    response_message = response["choices"][0]["message"]
+    print(response_message)
+
+    available_functions = {
+        "get_url_from_data": get_url_from_data,
+    }
+    function_name = response_message["function_call"]["name"]
+    function_to_call = available_functions[function_name]
+    function_args = json.loads(response_message["function_call"]["arguments"])
+    function_response = function_to_call(
+        url_value=function_args.get("url_value"),
+    )
+
+    messages.append(response_message)
+    messages.append(
+        {
+            "role": "function",
+            "name": "get_drama_recommendation",
+            "content": function_response,
+        }
+    )
+
+    second_response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo-0613",
+        messages=messages,
+    )
+
+    print(second_response.choices[0].message.content)
+
+
 def generate_answer(user_message, conversation_id: str = 'fa1010') -> dict[str, str]:
     history_file = load_conversation_history(conversation_id)
 
     context = dict(user_message=user_message)
     context["input"] = context["user_message"]
     context["intent_list"] = read_prompt_template(INTENT_LIST)
-    context["chat_history"] = get_chat_history(conversation_id)
+    # context["chat_history"] = get_chat_history(conversation_id)
 
     intent = parse_intent_chain.run(context)
 
     if intent == "kakao_channel" or intent == "kakao_sync" or intent == "kakao_social":
         context["related_document"] = query_db(context["user_message"])
+        use_function_call(user_message, context["related_document"])
         answer = find_answer_chain.run(context)
+
     else:
         context["related_documents"] = query_db(context["user_message"])
         answer = default_chain.run(context["user_message"])
