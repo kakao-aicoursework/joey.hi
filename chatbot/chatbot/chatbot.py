@@ -72,9 +72,9 @@ def read_prompt_template(file_path: str) -> str:
     return prompt_template
 
 
-def create_chain(template_path, output_key):
+def create_chain(llm, template_path, output_key):
     return LLMChain(
-        llm=llmModel,
+        llm=llm,
         prompt=ChatPromptTemplate.from_template(
             template=read_prompt_template(template_path)
         ),
@@ -83,12 +83,25 @@ def create_chain(template_path, output_key):
     )
 
 
+def create_function_chain(llm, template_path, output_key):
+    return LLMChain(
+        llm=llm,
+        prompt=ChatPromptTemplate.from_template(
+            template=read_prompt_template(template_path)
+        ),
+        output_key=output_key,
+        verbose=True
+    )
+
+
 parse_intent_chain = create_chain(
+    llm=llmModel,
     template_path=PARSE_INTENT_PROMPT_TEMPLATE,
     output_key="intent"
 )
 
 find_answer_chain = create_chain(
+    llm=llmModel,
     template_path=FIND_FROM_INFO_PROMPT_TEMPLATE,
     output_key="answer"
 )
@@ -138,7 +151,7 @@ def upload_embeddings_from_dir(dir_path):
                     failed_upload_files.append(file_path)
 
 
-upload_embeddings_from_dir(os.path.relpath('./data/'))
+# upload_embeddings_from_dir(os.path.relpath('./data/'))
 
 
 def query_db(query: str, use_retriever: bool = False) -> list[str]:
@@ -152,27 +165,24 @@ def query_db(query: str, use_retriever: bool = False) -> list[str]:
 
 
 def get_url_from_data(url_value):
-    data = {
-        "urls": url_value
-    }
-    return json.dumps(data)
+    return f"\n\nURL: {url_value}"
 
 
 def use_function_call(question, data):
     prompt = f"""
-    주어진 정보에서 질문과 관련된 URL(Uniform Resource Locators) 값 하나를 출력형식에 맞게 뽑아와줘.
+    주어진 정보에서 질문의 답변을 출력형식에 맞게 뽑아와줘.
 
     질문: {question}
     입력: {data}
-    
+
     <출력 형식>
-    : url 값
+    : 답변
     # """
     messages = [{"role": "user", "content": prompt}]
     functions = [
         {
             "name": "get_url_from_data",
-            "description": "주어진 자료에서 질문과 관련된 URL(Uniform Resource Locators) 값을 찾아야 합니다.",
+            "description": "주어진 자료에서 질문과 관련된 URL(Uniform Resource Locators) 값을 찾아야 합니다. url 값 하나만 반환하세요.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -192,33 +202,34 @@ def use_function_call(question, data):
         function_call="auto",
     )
     response_message = response["choices"][0]["message"]
-    print(response_message)
 
-    available_functions = {
-        "get_url_from_data": get_url_from_data,
-    }
-    function_name = response_message["function_call"]["name"]
-    function_to_call = available_functions[function_name]
-    function_args = json.loads(response_message["function_call"]["arguments"])
-    function_response = function_to_call(
-        url_value=function_args.get("url_value"),
-    )
-
-    messages.append(response_message)
-    messages.append(
-        {
-            "role": "function",
-            "name": "get_drama_recommendation",
-            "content": function_response,
+    if response_message.get("function_call"):
+        available_functions = {
+            "get_url_from_data": get_url_from_data,
         }
-    )
+        function_name = response_message["function_call"]["name"]
+        function_to_call = available_functions[function_name]
+        function_args = json.loads(response_message["function_call"]["arguments"])
+        function_response = function_to_call(
+            url_value=function_args.get("url_value"),
+        )
 
-    second_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo-0613",
-        messages=messages,
-    )
+        messages.append(response_message)
+        messages.append(
+            {
+                "role": "function",
+                "name": "get_drama_recommendation",
+                "content": function_response,
+            }
+        )
 
-    print(second_response.choices[0].message.content)
+        second_response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo-0613",
+            messages=messages,
+        )
+
+        return second_response.choices[0].message.content
+    return ""
 
 
 def generate_answer(user_message, conversation_id: str = 'fa1010') -> dict[str, str]:
@@ -233,9 +244,10 @@ def generate_answer(user_message, conversation_id: str = 'fa1010') -> dict[str, 
 
     if intent == "kakao_channel" or intent == "kakao_sync" or intent == "kakao_social":
         context["related_document"] = query_db(context["user_message"])
-        use_function_call(user_message, context["related_document"])
+        url = use_function_call(user_message, context["related_document"])
         answer = find_answer_chain.run(context)
-
+        if url != "":
+            answer = url
     else:
         context["related_documents"] = query_db(context["user_message"])
         answer = default_chain.run(context["user_message"])
@@ -251,8 +263,8 @@ def ask_to_chatbot(text):
 
 
 class Message(Base):
-    original_text: str
     text: str
+    is_answer: bool
     created_at: str
 
 
@@ -260,7 +272,8 @@ class State(pc.State):
     """The app state."""
 
     text: str = ""
-    messages: list[Message] = []
+    messages: list[Message] = [Message(text="안녕하세요, 저는 챗봇입니다. 무엇을 도와드릴까요?", is_answer=True,
+                                       created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"))]
     answer = "Answer will appear here."
 
     def output(self):
@@ -269,15 +282,21 @@ class State(pc.State):
         self.answer = ask_to_chatbot(self.text)
 
     def post(self):
+        self.messages = self.messages + [
+            Message(
+                text=self.text,
+                is_answer=False,
+                created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"),
+            )
+        ]
         self.output()
-        self.messages = [
-                            Message(
-                                original_text=self.text,
-                                text=self.answer,
-                                created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"),
-                            )
-                        ] + self.messages
-
+        self.messages = self.messages + [
+            Message(
+                text=self.answer,
+                is_answer=True,
+                created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"),
+            )
+        ]
 
 # Define views.
 
@@ -294,30 +313,40 @@ def header():
     )
 
 
-def down_arrow():
-    return pc.vstack(
-        pc.icon(
-            tag="arrow_down",
-            color="#666",
-        )
+def text_box_answer(text):
+    return pc.text(
+        text,
+        background_color="#fce303",
+        padding="1rem",
+        border_radius="20px",
+        float="left",
+        width="auto",
     )
 
 
-def text_box(text):
+def text_box_question(text):
     return pc.text(
         text,
         background_color="#fff",
         padding="1rem",
-        border_radius="8px",
+        border_radius="20px",
+        float="right",
     )
 
 
+def divide_message(message):
+    print(message)
+    if message.is_answer:
+        return text_box_answer(message.text)
+    else:
+        return text_box_question(message.text)
+
+
 def message(message):
+    component = divide_message(message)
     return pc.box(
         pc.vstack(
-            text_box(message.original_text),
-            down_arrow(),
-            text_box(message.text),
+            component,
             pc.box(
                 pc.text(" · ", margin_x="0.3rem"),
                 pc.text(message.created_at),
@@ -370,19 +399,20 @@ def index():
     """The main view."""
     return pc.container(
         header(),
-        pc.input(
-            placeholder="Chat with GPT",
-            on_blur=State.set_text,
-            margin_top="1rem",
-            border_color="#eaeaef"
-        ),
-        output(),
-        pc.button("Post", on_click=State.post, margin_top="1rem"),
         pc.vstack(
             pc.foreach(State.messages, message),
             margin_top="2rem",
             spacing="1rem",
             align_items="left"
+        ),
+        pc.hstack(
+            pc.input(
+                placeholder="Chat with GPT",
+                on_blur=State.set_text,
+                margin_top="1rem",
+                border_color="#eaeaef"
+            ),
+            pc.button("Post", on_click=State.post, margin_top="1rem"),
         ),
         padding="2rem",
         max_width="600px"
