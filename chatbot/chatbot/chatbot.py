@@ -18,6 +18,8 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import Chroma
 from pynecone.base import Base
 
+from .preprocessing import doc_preprocessing
+
 # openai.api_key = "<YOUR_OPENAI_API_KEY>"
 f = open("./chatbot/apiKey.txt", 'r')
 line = f.readline()
@@ -122,9 +124,12 @@ def upload_embedding_from_file(file_path):
         raise ValueError("Not supported file type")
     documents = loader(file_path).load()
 
-    text_splitter = CharacterTextSplitter(chunk_size=300,
-                                          chunk_overlap=50)  # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
-    docs = text_splitter.split_documents(documents)
+    text_splitter = CharacterTextSplitter(chunk_size=200,
+                                          chunk_overlap=20)  # 잘라서 주고, 그 사이에 overlap 줘서 자른다 (의미 손실을 막기 위해서).
+
+    processed_docs = doc_preprocessing(documents)
+
+    docs = text_splitter.split_documents(processed_docs)
 
     Chroma.from_documents(  # ChromaDB에 저장함.
         docs,
@@ -151,7 +156,7 @@ def upload_embeddings_from_dir(dir_path):
                     failed_upload_files.append(file_path)
 
 
-# upload_embeddings_from_dir(os.path.relpath('./data/'))
+upload_embeddings_from_dir(os.path.relpath('./data/'))
 
 
 def query_db(query: str, use_retriever: bool = False) -> list[str]:
@@ -170,13 +175,10 @@ def get_url_from_data(url_value):
 
 def use_function_call(question, data):
     prompt = f"""
-    주어진 정보에서 질문의 답변을 출력형식에 맞게 뽑아와줘.
+    주어진 정보에서 질문의 답변을 뽑아와줘.
 
     질문: {question}
     입력: {data}
-
-    <출력 형식>
-    : 답변
     # """
     messages = [{"role": "user", "content": prompt}]
     functions = [
@@ -289,6 +291,9 @@ class State(pc.State):
                 created_at=datetime.now().strftime("%B %d, %Y %I:%M %p"),
             )
         ]
+        self.update_answer()
+
+    def update_answer(self):
         self.output()
         self.messages = self.messages + [
             Message(
@@ -334,22 +339,21 @@ def text_box_question(text):
     )
 
 
-def divide_message(message):
-    print(message)
-    if message.is_answer:
-        return text_box_answer(message.text)
+def divide_message(msg):
+    if msg.is_answer:
+        return text_box_answer(msg.text)
     else:
-        return text_box_question(message.text)
+        return text_box_question(msg.text)
 
 
-def message(message):
-    component = divide_message(message)
+def message(msg):
+    component = divide_message(msg)
     return pc.box(
         pc.vstack(
             component,
             pc.box(
                 pc.text(" · ", margin_x="0.3rem"),
-                pc.text(message.created_at),
+                pc.text(msg.created_at),
                 display="flex",
                 font_size="0.8rem",
                 color="#666",
